@@ -1,0 +1,12 @@
+# Compiled executable
+main
+main.exe
+
+# Object files
+*.o
+
+# Dependency files
+*.d
+
+# VS Code specific
+.vscode/
