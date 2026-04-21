@@ -11,6 +11,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
@@ -30,6 +31,13 @@ inline V3 project(float x, float y, float z) {
     float sy = (x + z) * 0.500f + y + (SH * 0.3f);
     float sz = -(x + z) * 0.01f;
     return { sx, sy, sz };
+}
+
+inline void screenToWorldGround(float sx, float sy, float& x, float& z) {
+    float screenDiagonal = (sx - (SW * 0.5f)) / 0.866f;
+    float worldSum = 2.0f * (sy - (SH * 0.3f));
+    x = 0.5f * (screenDiagonal + worldSum);
+    z = 0.5f * (worldSum - screenDiagonal);
 }
 
 inline void col(float r, float g, float b, float a = 1.f) {
@@ -53,7 +61,86 @@ struct Car {
 static std::vector<Building> buildings;
 static std::vector<Car> cars;
 
-void spawnBuilding(float x, float z, float w, float h, float d, int windowType, bool cyanTrim) {
+static float cursorSX = SW * 0.5f;
+static float cursorSY = SH * 0.5f;
+static float cursorWX = 0.0f;
+static float cursorWZ = 0.0f;
+static bool hasPinnedPoint = false;
+static float pinnedSX = 0.0f;
+static float pinnedSY = 0.0f;
+static float pinnedWX = 0.0f;
+static float pinnedWZ = 0.0f;
+
+bool isInsideBuildingZone(const Building& b) {
+    float minX = b.x;
+    float maxX = b.x + b.w;
+    float maxZ = b.z + b.d;
+
+    // Keep towers above-road and away from foreground/road corridor.
+    if (minX < 260.0f) return false;
+    if (maxX > 1880.0f) return false;
+    if (b.z < -1320.0f) return false;
+    if (maxZ > 1220.0f) return false;
+    return true;
+}
+
+bool canPlaceBuildingAt(const Building& candidate) {
+    if (!isInsideBuildingZone(candidate)) {
+        return false;
+    }
+
+    const float separation = 10.0f;
+    for (const auto& existing : buildings) {
+        float cMinX = candidate.x - separation;
+        float cMaxX = candidate.x + candidate.w + separation;
+        float cMinZ = candidate.z - separation;
+        float cMaxZ = candidate.z + candidate.d + separation;
+
+        float eMinX = existing.x - separation;
+        float eMaxX = existing.x + existing.w + separation;
+        float eMinZ = existing.z - separation;
+        float eMaxZ = existing.z + existing.d + separation;
+
+        bool overlapsX = (cMinX < eMaxX) && (cMaxX > eMinX);
+        bool overlapsZ = (cMinZ < eMaxZ) && (cMaxZ > eMinZ);
+        if (overlapsX && overlapsZ) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tryPlaceBuilding(Building& building) {
+    if (canPlaceBuildingAt(building)) {
+        return true;
+    }
+
+    const float step = 20.0f;
+    const float maxOffset = 260.0f;
+
+    for (float offset = step; offset <= maxOffset; offset += step) {
+        for (float dx = -offset; dx <= offset; dx += offset) {
+            for (float dz = -offset; dz <= offset; dz += offset) {
+                if (std::abs(dx) != offset && std::abs(dz) != offset) {
+                    continue;
+                }
+
+                Building candidate = building;
+                candidate.x += dx;
+                candidate.z += dz;
+
+                if (canPlaceBuildingAt(candidate)) {
+                    building = candidate;
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+bool spawnBuilding(float x, float z, float w, float h, float d, int windowType, bool cyanTrim) {
     Building b;
     b.x = x;
     b.y = 0;
@@ -64,19 +151,17 @@ void spawnBuilding(float x, float z, float w, float h, float d, int windowType, 
     b.windowType = windowType;
     b.cyanTrim = cyanTrim;
 
-    bool collision = false;
-    for (const auto& existing : buildings) {
-        float xDist = std::abs(b.x - existing.x);
-        float zDist = std::abs(b.z - existing.z);
-        float minXDist = (b.w + existing.w) * 0.5f + 10.0f;
-        float minZDist = (b.d + existing.d) * 0.5f + 10.0f;
-        if (xDist < minXDist && zDist < minZDist) {
-            collision = true;
-            break;
-        }
-    }
+    if (!tryPlaceBuilding(b)) return false;
 
-    if (!collision) buildings.push_back(b);
+    buildings.push_back(b);
+    return true;
+}
+
+bool spawnBuildingAtScreen(float sx, float sy, float w, float h, float d, int windowType, bool cyanTrim) {
+    float x = 0.0f;
+    float z = 0.0f;
+    screenToWorldGround(sx, sy, x, z);
+    return spawnBuilding(x, z, w, h, d, windowType, cyanTrim);
 }
 
 void spawnCar(int lane) {
@@ -100,6 +185,41 @@ void quad4(V3 a, V3 b, V3 c, V3 d) {
         glVertex3f(c.x, c.y, c.z);
         glVertex3f(d.x, d.y, d.z);
     glEnd();
+}
+
+void drawText2D(float x, float y, const char* text, float r, float g, float b, float a = 1.0f) {
+    col(r, g, b, a);
+    glRasterPos2f(x, y);
+    for (const char* p = text; *p; ++p) {
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, *p);
+    }
+}
+
+void updateCursorFromScreen(float sx, float sy) {
+    cursorSX = sx;
+    cursorSY = sy;
+    screenToWorldGround(cursorSX, cursorSY, cursorWX, cursorWZ);
+}
+
+void onMouseMove(int x, int y) {
+    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y));
+    glutPostRedisplay();
+}
+
+void onMouseClick(int button, int state, int x, int y) {
+    if (button != GLUT_LEFT_BUTTON || state != GLUT_DOWN) {
+        return;
+    }
+
+    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y));
+    hasPinnedPoint = true;
+    pinnedSX = cursorSX;
+    pinnedSY = cursorSY;
+    pinnedWX = cursorWX;
+    pinnedWZ = cursorWZ;
+
+    std::printf("PIN screen=(%.1f, %.1f) world=(%.1f, %.1f)\n", pinnedSX, pinnedSY, pinnedWX, pinnedWZ);
+    std::fflush(stdout);
 }
 
 void drawStreetlight(float baseX, float baseZ, bool fromLeftSide) {
@@ -199,49 +319,142 @@ void drawBench(float x, float z, float w, float d, float seatY, float backH) {
     glLineWidth(1.0f);
 }
 
+void drawBenchAlongZ(float x, float z, float depthX, float lenZ, float seatY, float backH, bool backOnWestSide) {
+    col(0.44f, 0.29f, 0.16f);
+    quad4(project(x, seatY, z), project(x + depthX, seatY, z), project(x + depthX, seatY, z + lenZ), project(x, seatY, z + lenZ));
+
+    col(0.38f, 0.24f, 0.13f);
+    float backX = backOnWestSide ? x : (x + depthX);
+    quad4(project(backX, seatY, z), project(backX, seatY, z + lenZ), project(backX, seatY + backH, z + lenZ), project(backX, seatY + backH, z));
+
+    col(0.20f, 0.20f, 0.22f);
+    glLineWidth(3.0f);
+    glBegin(GL_LINES);
+        float x1 = x + 1.7f;
+        float x2 = x + depthX - 1.7f;
+        float z1 = z + 1.8f;
+        float z2 = z + lenZ - 1.8f;
+        V3 l1b = project(x1, 0.9f, z1); V3 l1t = project(x1, seatY, z1);
+        V3 l2b = project(x2, 0.9f, z1); V3 l2t = project(x2, seatY, z1);
+        V3 l3b = project(x1, 0.9f, z2); V3 l3t = project(x1, seatY, z2);
+        V3 l4b = project(x2, 0.9f, z2); V3 l4t = project(x2, seatY, z2);
+        glVertex3f(l1b.x, l1b.y, l1b.z); glVertex3f(l1t.x, l1t.y, l1t.z);
+        glVertex3f(l2b.x, l2b.y, l2b.z); glVertex3f(l2t.x, l2t.y, l2t.z);
+        glVertex3f(l3b.x, l3b.y, l3b.z); glVertex3f(l3t.x, l3t.y, l3t.z);
+        glVertex3f(l4b.x, l4b.y, l4b.z); glVertex3f(l4t.x, l4t.y, l4t.z);
+    glEnd();
+    glLineWidth(1.0f);
+}
+
 void drawTopBenchArea() {
+    const float benchHubX = 295.0f;
+    const float benchHubZ = 675.0f;
+
+    const float half = 58.0f;
+    const float inset = 8.0f;
+    const float seatY = 7.8f;
+    const float backH = 12.0f;
+
     col(0.12f, 0.12f, 0.14f, 0.92f);
-    quad4(project(430, 1.0f, -560), project(760, 1.0f, -560), project(830, 1.0f, -360), project(480, 1.0f, -360));
+    quad4(project(benchHubX - half, 1.0f, benchHubZ - half), project(benchHubX + half, 1.0f, benchHubZ - half), project(benchHubX + half, 1.0f, benchHubZ + half), project(benchHubX - half, 1.0f, benchHubZ + half));
 
-    col(0.40f, 0.92f, 1.0f, 0.12f);
-    quad4(project(455, 1.2f, -525), project(735, 1.2f, -525), project(790, 1.2f, -385), project(490, 1.2f, -385));
+    col(0.40f, 0.92f, 1.0f, 0.10f);
+    quad4(project(benchHubX - half + inset, 1.2f, benchHubZ - half + inset), project(benchHubX + half - inset, 1.2f, benchHubZ - half + inset), project(benchHubX + half - inset, 1.2f, benchHubZ + half - inset), project(benchHubX - half + inset, 1.2f, benchHubZ + half - inset));
 
-    drawBench(505, -500, 62.0f, 14.0f, 10.5f, 18.0f);
-    drawBench(595, -455, 62.0f, 14.0f, 10.5f, 18.0f);
-    drawBench(685, -410, 62.0f, 14.0f, 10.5f, 18.0f);
+    // North side benches facing center (smaller and pushed inward).
+    drawBench(benchHubX - 32.0f, benchHubZ + half - 26.0f, 18.0f, 5.0f, seatY, backH);
+    drawBench(benchHubX - 8.0f, benchHubZ + half - 26.0f, 18.0f, 5.0f, seatY, backH);
+    drawBench(benchHubX + 16.0f, benchHubZ + half - 26.0f, 18.0f, 5.0f, seatY, backH);
 
-    col(0.11f, 0.11f, 0.13f, 0.88f);
-    quad4(project(770, 1.0f, -720), project(1040, 1.0f, -720), project(1105, 1.0f, -565), project(805, 1.0f, -565));
+    // West side benches facing center (smaller and pushed inward).
+    drawBenchAlongZ(benchHubX - half + 17.0f, benchHubZ - 32.0f, 5.0f, 18.0f, seatY, backH, true);
+    drawBenchAlongZ(benchHubX - half + 17.0f, benchHubZ - 8.0f, 5.0f, 18.0f, seatY, backH, true);
+    drawBenchAlongZ(benchHubX - half + 17.0f, benchHubZ + 16.0f, 5.0f, 18.0f, seatY, backH, true);
 
-    col(0.35f, 0.82f, 1.0f, 0.08f);
-    quad4(project(790, 1.2f, -690), project(1020, 1.2f, -690), project(1070, 1.2f, -585), project(820, 1.2f, -585));
-
-    drawBench(805, -675, 58.0f, 14.0f, 10.3f, 17.0f);
-    drawBench(890, -630, 58.0f, 14.0f, 10.3f, 17.0f);
-    drawBench(975, -585, 58.0f, 14.0f, 10.3f, 17.0f);
+    // East side benches facing center (smaller and pushed inward).
+    drawBenchAlongZ(benchHubX + half - 22.0f, benchHubZ - 32.0f, 5.0f, 18.0f, seatY, backH, false);
+    drawBenchAlongZ(benchHubX + half - 22.0f, benchHubZ - 8.0f, 5.0f, 18.0f, seatY, backH, false);
+    drawBenchAlongZ(benchHubX + half - 22.0f, benchHubZ + 16.0f, 5.0f, 18.0f, seatY, backH, false);
 }
 
 void drawConvenienceStore() {
-    // South-east of gas station: larger x and deeper z so it sits down-right on screen.
-    col(0.06f, 0.06f, 0.08f);
-    quad4(project(-170, 6.0f, 760), project(90, 6.0f, 760), project(120, 6.0f, 980), project(-150, 6.0f, 980));
+    float storeX = -505.0f;
+    float storeZ = -8.0f;
 
-    col(0.12f, 0.12f, 0.15f);
-    quad4(project(-150, 8.0f, 785), project(70, 8.0f, 785), project(95, 8.0f, 955), project(-128, 8.0f, 955));
+    const float baseY = 6.0f;
+    const float sizeX = 250.0f;
+    const float sizeZ = 280.0f;
+    const float topY = 136.0f;
 
-    col(0.18f, 0.18f, 0.22f);
-    quad4(project(-120, 8.0f, 820), project(40, 8.0f, 820), project(58, 8.0f, 915), project(-102, 8.0f, 915));
+    // Taller, longer footprint pushed toward user target pin.
+    col(0.07f, 0.08f, 0.11f);
+    quad4(project(storeX, baseY, storeZ), project(storeX + sizeX, baseY, storeZ), project(storeX + sizeX, topY, storeZ), project(storeX, topY, storeZ));
+    quad4(project(storeX, baseY, storeZ), project(storeX, baseY, storeZ + sizeZ), project(storeX, topY, storeZ + sizeZ), project(storeX, topY, storeZ));
+    quad4(project(storeX + sizeX, baseY, storeZ), project(storeX + sizeX, baseY, storeZ + sizeZ), project(storeX + sizeX, topY, storeZ + sizeZ), project(storeX + sizeX, topY, storeZ));
 
-    col(0.95f, 0.85f, 0.28f);
-    quad4(project(-125, 34, 812), project(35, 34, 812), project(48, 34, 835), project(-112, 34, 835));
+    col(0.10f, 0.11f, 0.15f);
+    quad4(project(storeX, topY, storeZ), project(storeX + sizeX, topY, storeZ), project(storeX + sizeX, topY, storeZ + sizeZ), project(storeX, topY, storeZ + sizeZ));
 
-    col(0.35f, 0.95f, 0.55f, 0.92f);
-    quad4(project(-115, 20, 825), project(25, 20, 825), project(36, 31, 880), project(-104, 31, 880));
+    // Full-height glass panes on front and west faces.
+    col(0.45f, 0.95f, 1.0f, 0.35f);
+    quad4(project(storeX + 8.0f, baseY + 10.0f, storeZ), project(storeX + sizeX - 8.0f, baseY + 10.0f, storeZ), project(storeX + sizeX - 8.0f, topY - 10.0f, storeZ), project(storeX + 8.0f, topY - 10.0f, storeZ));
+    quad4(project(storeX, baseY + 10.0f, storeZ + 8.0f), project(storeX, baseY + 10.0f, storeZ + sizeZ - 8.0f), project(storeX, topY - 10.0f, storeZ + sizeZ - 8.0f), project(storeX, topY - 10.0f, storeZ + 8.0f));
 
-    col(0.90f, 0.90f, 0.95f);
-    quad4(project(-95, 20, 860), project(-48, 20, 860), project(-40, 31, 860), project(-87, 31, 860));
-    quad4(project(-25, 20, 860), project(22, 20, 860), project(30, 31, 860), project(-17, 31, 860));
-    quad4(project(45, 20, 860), project(92, 20, 860), project(100, 31, 860), project(53, 31, 860));
+    col(0.80f, 0.95f, 1.0f, 0.18f);
+    quad4(project(storeX + 15.0f, baseY + 14.0f, storeZ + 2.0f), project(storeX + sizeX - 15.0f, baseY + 14.0f, storeZ + 2.0f), project(storeX + sizeX - 15.0f, topY - 14.0f, storeZ + 2.0f), project(storeX + 15.0f, topY - 14.0f, storeZ + 2.0f));
+    quad4(project(storeX + 2.0f, baseY + 14.0f, storeZ + 15.0f), project(storeX + 2.0f, baseY + 14.0f, storeZ + sizeZ - 15.0f), project(storeX + 2.0f, topY - 14.0f, storeZ + sizeZ - 15.0f), project(storeX + 2.0f, topY - 14.0f, storeZ + 15.0f));
+
+    // Split both glass facades into a 4x2 pane grid.
+    col(0.82f, 0.95f, 1.0f, 0.45f);
+    glLineWidth(1.5f);
+    glBegin(GL_LINES);
+        float gXMin = storeX + 8.0f;
+        float gXMax = storeX + sizeX - 8.0f;
+        float gYMin = baseY + 10.0f;
+        float gYMax = topY - 10.0f;
+        float gX1 = gXMin + (gXMax - gXMin) * 0.25f;
+        float gX2 = gXMin + (gXMax - gXMin) * 0.50f;
+        float gX3 = gXMin + (gXMax - gXMin) * 0.75f;
+        float gYMid = gYMin + (gYMax - gYMin) * 0.50f;
+
+        glVertex3f(project(gX1, gYMin, storeZ).x, project(gX1, gYMin, storeZ).y, project(gX1, gYMin, storeZ).z);
+        glVertex3f(project(gX1, gYMax, storeZ).x, project(gX1, gYMax, storeZ).y, project(gX1, gYMax, storeZ).z);
+        glVertex3f(project(gX2, gYMin, storeZ).x, project(gX2, gYMin, storeZ).y, project(gX2, gYMin, storeZ).z);
+        glVertex3f(project(gX2, gYMax, storeZ).x, project(gX2, gYMax, storeZ).y, project(gX2, gYMax, storeZ).z);
+        glVertex3f(project(gX3, gYMin, storeZ).x, project(gX3, gYMin, storeZ).y, project(gX3, gYMin, storeZ).z);
+        glVertex3f(project(gX3, gYMax, storeZ).x, project(gX3, gYMax, storeZ).y, project(gX3, gYMax, storeZ).z);
+        glVertex3f(project(gXMin, gYMid, storeZ).x, project(gXMin, gYMid, storeZ).y, project(gXMin, gYMid, storeZ).z);
+        glVertex3f(project(gXMax, gYMid, storeZ).x, project(gXMax, gYMid, storeZ).y, project(gXMax, gYMid, storeZ).z);
+
+        float gZMin = storeZ + 8.0f;
+        float gZMax = storeZ + sizeZ - 8.0f;
+        float gZ1 = gZMin + (gZMax - gZMin) * 0.25f;
+        float gZ2 = gZMin + (gZMax - gZMin) * 0.50f;
+        float gZ3 = gZMin + (gZMax - gZMin) * 0.75f;
+        glVertex3f(project(storeX, gYMin, gZ1).x, project(storeX, gYMin, gZ1).y, project(storeX, gYMin, gZ1).z);
+        glVertex3f(project(storeX, gYMax, gZ1).x, project(storeX, gYMax, gZ1).y, project(storeX, gYMax, gZ1).z);
+        glVertex3f(project(storeX, gYMin, gZ2).x, project(storeX, gYMin, gZ2).y, project(storeX, gYMin, gZ2).z);
+        glVertex3f(project(storeX, gYMax, gZ2).x, project(storeX, gYMax, gZ2).y, project(storeX, gYMax, gZ2).z);
+        glVertex3f(project(storeX, gYMin, gZ3).x, project(storeX, gYMin, gZ3).y, project(storeX, gYMin, gZ3).z);
+        glVertex3f(project(storeX, gYMax, gZ3).x, project(storeX, gYMax, gZ3).y, project(storeX, gYMax, gZ3).z);
+        glVertex3f(project(storeX, gYMid, gZMin).x, project(storeX, gYMid, gZMin).y, project(storeX, gYMid, gZMin).z);
+        glVertex3f(project(storeX, gYMid, gZMax).x, project(storeX, gYMid, gZMax).y, project(storeX, gYMid, gZMax).z);
+    glEnd();
+    glLineWidth(1.0f);
+
+    // Entrance and accent sign.
+    col(0.95f, 0.95f, 1.0f, 0.9f);
+    quad4(project(storeX + 88.0f, baseY + 6.0f, storeZ), project(storeX + 138.0f, baseY + 6.0f, storeZ), project(storeX + 138.0f, baseY + 62.0f, storeZ), project(storeX + 88.0f, baseY + 62.0f, storeZ));
+
+    // Low-opacity grey path coming out from the entrance.
+    col(0.62f, 0.62f, 0.64f, 0.18f);
+        quad4(project(storeX + 94.0f, 1.05f, storeZ - 72.0f),
+            project(storeX + 132.0f, 1.05f, storeZ - 72.0f),
+            project(storeX + 132.0f, 1.05f, storeZ),
+            project(storeX + 94.0f, 1.05f, storeZ));
+
+    col(0.96f, 0.84f, 0.30f);
+    quad4(project(storeX + 52.0f, topY + 3.0f, storeZ + 12.0f), project(storeX + 194.0f, topY + 3.0f, storeZ + 12.0f), project(storeX + 198.0f, topY + 15.0f, storeZ + 40.0f), project(storeX + 56.0f, topY + 15.0f, storeZ + 40.0f));
 }
 
 void drawGasStation() {
@@ -557,8 +770,46 @@ void display() {
     drawPathway(1200, -650, 1335, -540, 68.0f, 10.0f, 0.60f, 0.85f, 1.0f, 0.08f);
 
     for (const auto& b : buildings) drawBuilding(b);
+
+    drawPathway(430, -990, 620, -860, 2.5f, 12.0f, 0.65f, 0.95f, 1.0f, 0.08f);
+    drawPathway(740, -860, 950, -710, 2.5f, 10.0f, 0.60f, 0.90f, 1.0f, 0.07f);
+    drawPathway(1030, -730, 1230, -590, 2.5f, 10.0f, 0.55f, 0.85f, 1.0f, 0.065f);
+
     drawConvenienceStore();
     for (const auto& c : cars) drawCar(c);
+
+    glDisable(GL_DEPTH_TEST);
+
+    char liveText[160];
+    std::snprintf(liveText, sizeof(liveText), "Live  screen:(%.1f, %.1f)  world:(%.1f, %.1f)", cursorSX, cursorSY, cursorWX, cursorWZ);
+    drawText2D(18.0f, SH - 22.0f, liveText, 0.78f, 0.98f, 1.0f, 0.95f);
+    drawText2D(18.0f, SH - 40.0f, "Left click to pin point and print coords in terminal", 0.65f, 0.80f, 0.90f, 0.9f);
+
+    if (hasPinnedPoint) {
+        char pinText[160];
+        std::snprintf(pinText, sizeof(pinText), "Pinned screen:(%.1f, %.1f)  world:(%.1f, %.1f)", pinnedSX, pinnedSY, pinnedWX, pinnedWZ);
+        drawText2D(18.0f, SH - 58.0f, pinText, 1.0f, 0.95f, 0.65f, 0.95f);
+
+        col(1.0f, 0.95f, 0.65f, 0.8f);
+        glLineWidth(1.5f);
+        glBegin(GL_LINES);
+            glVertex3f(pinnedSX - 8.0f, pinnedSY, 0.0f);
+            glVertex3f(pinnedSX + 8.0f, pinnedSY, 0.0f);
+            glVertex3f(pinnedSX, pinnedSY - 8.0f, 0.0f);
+            glVertex3f(pinnedSX, pinnedSY + 8.0f, 0.0f);
+        glEnd();
+        glLineWidth(1.0f);
+    }
+
+    col(0.55f, 0.95f, 1.0f, 0.85f);
+    glBegin(GL_LINES);
+        glVertex3f(cursorSX - 6.0f, cursorSY, 0.0f);
+        glVertex3f(cursorSX + 6.0f, cursorSY, 0.0f);
+        glVertex3f(cursorSX, cursorSY - 6.0f, 0.0f);
+        glVertex3f(cursorSX, cursorSY + 6.0f, 0.0f);
+    glEnd();
+
+    glEnable(GL_DEPTH_TEST);
 
     glutSwapBuffers();
 }
@@ -585,6 +836,8 @@ int main(int argc, char** argv) {
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    updateCursorFromScreen(SW * 0.5f, SH * 0.5f);
 
     spawnBuilding(200, -800, 150, 400, 130, 1, true);
     spawnBuilding(300, -600, 180, 500, 130, 2, false);
@@ -626,11 +879,26 @@ int main(int argc, char** argv) {
     spawnBuilding(1270, 40, 125, 340, 95, 1, true);
     spawnBuilding(1400, 110, 120, 320, 90, 2, false);
     spawnBuilding(1530, 170, 115, 310, 90, 3, true);
-    spawnBuilding(1660, 230, 110, 300, 85, 1, false);
+    spawnBuilding(1660, 180, 110, 300, 85, 1, false);
+
+    // Targeted fills around user-provided pin areas.
+    spawnBuildingAtScreen(555, 977, 102, 300, 90, 1, true);
+    spawnBuildingAtScreen(635, 940, 98, 285, 86, 2, false);
+    spawnBuildingAtScreen(1489, 934, 108, 310, 92, 3, true);
+    spawnBuildingAtScreen(1570, 900, 100, 290, 86, 1, false);
+
+    // New requested additions.
+    spawnBuildingAtScreen(1302, 1036, 96, 285, 86, 2, true);
+    spawnBuildingAtScreen(305, 1015, 94, 275, 84, 1, false);
+    spawnBuildingAtScreen(1345, 990, 98, 292, 88, 3, true);
+    spawnBuildingAtScreen(1606, 795, 102, 300, 90, 2, false);
 
     for (int i = 0; i < 4; ++i) spawnCar(i);
 
     glutDisplayFunc(display);
+    glutMouseFunc(onMouseClick);
+    glutPassiveMotionFunc(onMouseMove);
+    glutMotionFunc(onMouseMove);
     glutTimerFunc(0, timer, 0);
     glutMainLoop();
     return 0;
