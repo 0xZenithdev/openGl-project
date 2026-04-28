@@ -58,8 +58,19 @@ struct Car {
     float len, wid, tall;
 };
 
+struct Pedestrian {
+    float x, y, z;
+    float dirX, dirZ;  // Direction vector (normalized)
+    float speed;
+    float animPhase;   // Animation cycle (0-1)
+    float jacketR, jacketG, jacketB;
+    float pantsR, pantsG, pantsB;
+    float skinR, skinG, skinB;
+};
+
 static std::vector<Building> buildings;
 static std::vector<Car> cars;
+static std::vector<Pedestrian> pedestrians;
 
 static float cursorSX = SW * 0.5f;
 static float cursorSY = SH * 0.5f;
@@ -178,6 +189,243 @@ void spawnCar(int lane) {
     cars.push_back(c);
 }
 
+// Forward declarations
+void quad4(V3 a, V3 b, V3 c, V3 d);
+
+bool isOnRoad(float x, float z) {
+    // Road lanes are at y=0 in middle area; avoid range -105 to 105 in X
+    if (x >= -115.0f && x <= 115.0f) {
+        return true;  // Central road corridor
+    }
+    return false;
+}
+
+bool canSpawnPedestrianAt(float x, float z) {
+    // Can't spawn on road
+    if (isOnRoad(x, z)) return false;
+    
+    // Must be in one of the walking zones
+    bool inLeftZone = (x >= 250.0f && x <= 300.0f);  // Left pedestrian zone
+    bool inRightZone = (x >= 1840.0f && x <= 1890.0f); // Right pedestrian zone
+    bool inMiddleZone = (x >= 400.0f && x <= 1740.0f); // Middle safe zone
+    
+    if (!inLeftZone && !inRightZone && !inMiddleZone) return false;
+    
+    // Can't spawn too close to buildings (stricter clearance)
+    const float buildingClearance = 80.0f;  // Increased from 60
+    for (const auto& b : buildings) {
+        if (x > b.x - buildingClearance && x < b.x + b.w + buildingClearance &&
+            z > b.z - buildingClearance && z < b.z + b.d + buildingClearance) {
+            return false;
+        }
+    }
+    
+    // Must be within playable bounds
+    if (z < -1280.0f || z > 920.0f) return false;
+    
+    return true;
+}
+
+void spawnPedestrian() {
+    if (pedestrians.size() >= 100) return;  // Max 100 pedestrians
+    
+    Pedestrian p;
+    
+    // Spawn location: 80% near road edges, 20% in middle areas
+    int attempts = 0;
+    bool nearRoad = (rand() % 100) < 80;
+    
+    do {
+        if (nearRoad) {
+            // Spawn near road edges (left: 250-290, right: 1850-1890)
+            if (rand() % 2 == 0) {
+                // Left side near road
+                p.x = randF(250.0f, 300.0f);
+            } else {
+                // Right side near road
+                p.x = randF(1840.0f, 1890.0f);
+            }
+            p.z = randF(-1280.0f, 920.0f);
+        } else {
+            // Spawn in middle areas
+            p.x = randF(400.0f, 1740.0f);
+            p.z = randF(-1280.0f, 920.0f);
+        }
+        attempts++;
+    } while (!canSpawnPedestrianAt(p.x, p.z) && attempts < 15);
+    
+    if (attempts >= 15) return;  // Failed to find spot
+    
+    p.y = 0.0f;
+    
+    // Direction: if spawning near road, walk parallel (along z-axis)
+    if (nearRoad) {
+        p.dirX = 0.0f;
+        p.dirZ = (rand() % 2 == 0) ? 1.0f : -1.0f;  // Up or down the map
+    } else {
+        // Random direction for middle spawns
+        float angle = randF(0.0f, 6.28f);
+        p.dirX = std::cos(angle);
+        p.dirZ = std::sin(angle);
+    }
+    
+    p.speed = randF(0.5f, 1.5f);
+    p.animPhase = randF(0.0f, 1.0f);
+    
+    // Random clothing colors
+    p.jacketR = randF(0.2f, 0.9f);
+    p.jacketG = randF(0.2f, 0.85f);
+    p.jacketB = randF(0.2f, 0.9f);
+    
+    p.pantsR = randF(0.1f, 0.7f);
+    p.pantsG = randF(0.1f, 0.7f);
+    p.pantsB = randF(0.15f, 0.8f);
+    
+    p.skinR = 0.92f;
+    p.skinG = 0.85f;
+    p.skinB = 0.78f;
+    
+    pedestrians.push_back(p);
+}
+
+void drawPedestrian(const Pedestrian& p) {
+    // Head (small quad at top of body, ~4 units)
+    col(p.skinR, p.skinG, p.skinB);
+    quad4(project(p.x - 2.0f, p.y + 16.0f, p.z),
+          project(p.x + 2.0f, p.y + 16.0f, p.z),
+          project(p.x + 2.0f, p.y + 20.0f, p.z + 2.0f),
+          project(p.x - 2.0f, p.y + 20.0f, p.z + 2.0f));
+    
+    // Torso/jacket (main body ~6 units tall, 3 units wide)
+    col(p.jacketR, p.jacketG, p.jacketB);
+    float torsoH = 8.0f;
+    quad4(project(p.x - 1.5f, p.y + 8.0f, p.z),
+          project(p.x + 1.5f, p.y + 8.0f, p.z),
+          project(p.x + 1.5f, p.y + 8.0f + torsoH, p.z + 2.0f),
+          project(p.x - 1.5f, p.y + 8.0f + torsoH, p.z + 2.0f));
+    
+    // Walking animation: leg phases (sine wave for natural motion)
+    float legSwing = std::sin(p.animPhase * 6.28f);  // -1 to 1
+    float armSwing = std::sin(p.animPhase * 6.28f);  // Opposite arm motion
+    
+    // Left leg (animated)
+    col(p.pantsR, p.pantsG, p.pantsB);
+    float leftLegSwing = std::sin((p.animPhase + 0.0f) * 6.28f) * 2.0f;  // -2 to 2 unit swing
+    quad4(project(p.x - 0.8f, p.y + 8.0f, p.z),
+          project(p.x - 2.0f, p.y + 8.0f + leftLegSwing, p.z + 3.0f),
+          project(p.x - 1.8f, p.y + 0.0f, p.z + 3.5f),
+          project(p.x - 0.6f, p.y, p.z + 0.5f));
+    
+    // Right leg (animated, opposite phase)
+    float rightLegSwing = std::sin((p.animPhase + 0.5f) * 6.28f) * 2.0f;
+    quad4(project(p.x + 0.8f, p.y + 8.0f, p.z),
+          project(p.x + 2.0f, p.y + 8.0f + rightLegSwing, p.z + 3.0f),
+          project(p.x + 1.8f, p.y + 0.0f, p.z + 3.5f),
+          project(p.x + 0.6f, p.y, p.z + 0.5f));
+    
+    // Left arm swinging
+    col(p.skinR * 0.95f, p.skinG * 0.95f, p.skinB * 0.95f);
+    float leftArmSwing = std::sin((p.animPhase + 0.0f) * 6.28f) * 2.5f;
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+        V3 shoulderL = project(p.x - 1.8f, p.y + 14.0f, p.z + 1.0f);
+        V3 elbowL = project(p.x - 2.5f, p.y + 12.0f + leftArmSwing, p.z + 2.5f);
+        glVertex3f(shoulderL.x, shoulderL.y, shoulderL.z);
+        glVertex3f(elbowL.x, elbowL.y, elbowL.z);
+    glEnd();
+    
+    // Right arm swinging (opposite)
+    float rightArmSwing = std::sin((p.animPhase + 0.5f) * 6.28f) * 2.5f;
+    glBegin(GL_LINES);
+        V3 shoulderR = project(p.x + 1.8f, p.y + 14.0f, p.z + 1.0f);
+        V3 elbowR = project(p.x + 2.5f, p.y + 12.0f + rightArmSwing, p.z + 2.5f);
+        glVertex3f(shoulderR.x, shoulderR.y, shoulderR.z);
+        glVertex3f(elbowR.x, elbowR.y, elbowR.z);
+    glEnd();
+    glLineWidth(1.0f);
+}
+
+void updatePedestrian(Pedestrian& p, float dt) {
+    // Check if in road-adjacent zones (must walk parallel to road)
+    bool inLeftRoadZone = (p.x >= 250.0f && p.x <= 300.0f);   // Left pedestrian zone
+    bool inRightRoadZone = (p.x >= 1840.0f && p.x <= 1890.0f); // Right pedestrian zone
+    
+    if (inLeftRoadZone || inRightRoadZone) {
+        // ENFORCE: Walk parallel to road (Z-axis only, no X movement)
+        p.dirX = 0.0f;  // Lock X direction
+        p.dirZ = (p.dirZ > 0.0f) ? 1.0f : -1.0f;  // Ensure walking up or down
+    } else {
+        // In middle areas: active collision avoidance
+        float steerX = 0.0f, steerZ = 0.0f;
+        const float buildingDetectRadius = 150.0f;  // Increased detection radius
+        
+        // Strong building avoidance
+        for (const auto& b : buildings) {
+            float bCenterX = b.x + b.w * 0.5f;
+            float bCenterZ = b.z + b.d * 0.5f;
+            float distX = p.x - bCenterX;
+            float distZ = p.z - bCenterZ;
+            float dist = std::sqrt(distX * distX + distZ * distZ);
+            
+            if (dist < buildingDetectRadius && dist > 0.1f) {
+                // Strong repulsion force
+                float force = 1.5f - (dist / buildingDetectRadius);  // Increased force
+                if (force > 0.0f) {
+                    steerX += (distX / dist) * force;
+                    steerZ += (distZ / dist) * force;
+                }
+            }
+        }
+        
+        // Strong road avoidance (keep away from central road)
+        if (p.x >= -115.0f && p.x <= 115.0f) {
+            // INSIDE road - push away strongly
+            if (p.x < 0.0f) {
+                steerX -= 2.5f;  // Push left
+            } else {
+                steerX += 2.5f;  // Push right
+            }
+        } else if (p.x > 115.0f && p.x < 250.0f) {
+            // Between road and left zone - push toward left zone
+            steerX -= 1.5f;  // Push left
+        } else if (p.x > 1890.0f && p.x < 2000.0f) {
+            // Between right zone and road - push toward right zone
+            steerX += 1.5f;  // Push right
+        }
+        
+        // Normalize and blend steering
+        if (steerX != 0.0f || steerZ != 0.0f) {
+            float steerLen = std::sqrt(steerX * steerX + steerZ * steerZ);
+            if (steerLen > 0.1f) {
+                steerX /= steerLen;
+                steerZ /= steerLen;
+                // Higher steering weight for strong collision avoidance
+                p.dirX = p.dirX * 0.30f + steerX * 0.70f;  // More avoidance (was 80/20)
+                p.dirZ = p.dirZ * 0.30f + steerZ * 0.70f;
+                
+                float dirLen = std::sqrt(p.dirX * p.dirX + p.dirZ * p.dirZ);
+                if (dirLen > 0.1f) {
+                    p.dirX /= dirLen;
+                    p.dirZ /= dirLen;
+                }
+            }
+        }
+    }
+    
+    // Movement
+    p.x += p.dirX * p.speed;
+    p.z += p.dirZ * p.speed;
+    
+    // Animation phase
+    p.animPhase += dt * 0.016f;
+    if (p.animPhase > 1.0f) p.animPhase -= 1.0f;
+    
+    // Only remove if they go out of z-axis bounds (allow indefinite x movement along road)
+    if (p.z < -1350.0f || p.z > 1000.0f) {
+        // Will be removed in timer loop
+    }
+}
+
 void quad4(V3 a, V3 b, V3 c, V3 d) {
     glBegin(GL_QUADS);
         glVertex3f(a.x, a.y, a.z);
@@ -202,7 +450,7 @@ void updateCursorFromScreen(float sx, float sy) {
 }
 
 void onMouseMove(int x, int y) {
-    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y));
+    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y - 69.0f));
     glutPostRedisplay();
 }
 
@@ -211,7 +459,7 @@ void onMouseClick(int button, int state, int x, int y) {
         return;
     }
 
-    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y));
+    updateCursorFromScreen(static_cast<float>(x), static_cast<float>(SH - y - 69.0f));
     hasPinnedPoint = true;
     pinnedSX = cursorSX;
     pinnedSY = cursorSY;
@@ -378,8 +626,8 @@ void drawTopBenchArea() {
 }
 
 void drawConvenienceStore() {
-    float storeX = -505.0f;
-    float storeZ = -8.0f;
+    float storeX = -462.2f;
+    float storeZ = -175.8f;
 
     const float baseY = 6.0f;
     const float sizeX = 250.0f;
@@ -506,9 +754,6 @@ void drawBuildingWindows(const Building& b) {
     float windowSizeX = 12.0f;
     float windowSizeY = 15.0f;
     int sideCols = 3;
-    float winR = 0.3f;
-    float winG = 1.0f;
-    float winB = 0.9f;
 
     if (b.windowType == 2) {
         windowSpacingX = 40.0f;
@@ -516,19 +761,10 @@ void drawBuildingWindows(const Building& b) {
         windowSizeX = 8.0f;
         windowSizeY = 24.0f;
         sideCols = 2;
-        winR = 1.0f;
-        winG = 0.82f;
-        winB = 0.35f;
-    } else if (b.windowType == 3) {
-        windowSpacingY = 58.0f;
-        winR = 0.95f;
-        winG = 0.55f;
-        winB = 1.0f;
     }
 
-    col(winR, winG, winB, 0.9f);
-
     if (b.windowType == 3) {
+        windowSpacingY = 58.0f;
         float insetX = b.w * 0.05f;
         float insetZ = b.d * 0.05f;
         float bandH = 9.0f;
@@ -539,6 +775,20 @@ void drawBuildingWindows(const Building& b) {
             float cy = b.y + (row + 0.5f) * windowSpacingY;
             float x1 = b.x + insetX;
             float x2 = b.x + b.w - insetX;
+
+            // Vary color for type 3 windows with maximum local variation
+            int colorIdx = (int)((row * 73.0f + b.x * 3.0f + b.z * 5.0f)) % 10;
+            float cr, cg, cb;
+            if (colorIdx < 3) {
+                cr = 0.95f; cg = 0.70f; cb = 0.30f;  // Warm amber
+            } else if (colorIdx < 6) {
+                cr = 0.25f; cg = 0.70f; cb = 0.95f;  // Cool blue
+            } else if (colorIdx < 8) {
+                cr = 0.35f; cg = 0.85f; cb = 0.90f;  // Cool cyan
+            } else {
+                cr = 0.08f; cg = 0.08f; cb = 0.10f;  // Dark/off
+            }
+            col(cr, cg, cb, colorIdx < 8 ? 0.75f : 0.15f);
 
             V3 wbl = project(x1, cy - bandH * 0.5f, b.z);
             V3 wbr = project(x2, cy - bandH * 0.5f, b.z);
@@ -562,8 +812,23 @@ void drawBuildingWindows(const Building& b) {
     if (windowsPerRow < 1) windowsPerRow = 1;
     if (windowsPerCol < 1) windowsPerCol = 1;
 
+    // Front face windows with maximally varied colors
     for (int row = 0; row < windowsPerCol; ++row) {
         for (int colIdx = 0; colIdx < windowsPerRow; ++colIdx) {
+            // Maximize local variation: row and col are dominant in hash
+            int colorIdx = (int)((row * 73.0f + colIdx * 97.0f + b.x * 3.0f + b.z * 5.0f)) % 10;
+            float cr, cg, cb;
+            if (colorIdx < 3) {
+                cr = 0.95f; cg = 0.70f; cb = 0.30f;  // Warm amber
+            } else if (colorIdx < 6) {
+                cr = 0.25f; cg = 0.70f; cb = 0.95f;  // Cool blue
+            } else if (colorIdx < 8) {
+                cr = 0.35f; cg = 0.85f; cb = 0.90f;  // Cool cyan
+            } else {
+                cr = 0.08f; cg = 0.08f; cb = 0.10f;  // Dark/off
+            }
+            col(cr, cg, cb, colorIdx < 8 ? 0.75f : 0.15f);
+
             float windowX = b.x + (colIdx + 0.5f) * windowSpacingX;
             float windowY = b.y + (row + 0.5f) * windowSpacingY;
             float windowZ = b.z;
@@ -575,8 +840,22 @@ void drawBuildingWindows(const Building& b) {
         }
     }
 
+    // Side face windows with maximally varied colors
     for (int row = 0; row < windowsPerCol; ++row) {
         for (int colIdx = 0; colIdx < sideCols; ++colIdx) {
+            int colorIdx = (int)((row * 73.0f + colIdx * 97.0f + b.x * 3.0f + b.z * 5.0f + 41.0f)) % 10;
+            float cr, cg, cb;
+            if (colorIdx < 3) {
+                cr = 0.95f; cg = 0.70f; cb = 0.30f;  // Warm amber
+            } else if (colorIdx < 6) {
+                cr = 0.25f; cg = 0.70f; cb = 0.95f;  // Cool blue
+            } else if (colorIdx < 8) {
+                cr = 0.35f; cg = 0.85f; cb = 0.90f;  // Cool cyan
+            } else {
+                cr = 0.08f; cg = 0.08f; cb = 0.10f;  // Dark/off
+            }
+            col(cr, cg, cb, colorIdx < 8 ? 0.75f : 0.15f);
+
             float windowX = b.x;
             float windowY = b.y + (row + 0.5f) * windowSpacingY;
             float windowZ = b.z + (colIdx + 0.5f) * (b.d / sideCols);
@@ -599,15 +878,16 @@ void drawBuilding(const Building& b) {
     V3 btl = project(b.x, b.y + b.h, b.z + b.d);
     V3 btr = project(b.x + b.w, b.y + b.h, b.z + b.d);
 
-    col(0.05f, 0.05f, 0.1f);
+    col(0.08f, 0.08f, 0.12f);
     quad4(fbl, bbl, btl, ftl);
-    col(0.08f, 0.08f, 0.15f);
+    col(0.14f, 0.15f, 0.20f);
     quad4(ftl, ftr, btr, btl);
-    col(0.06f, 0.06f, 0.12f);
+    col(0.10f, 0.10f, 0.15f);
     quad4(fbl, fbr, ftr, ftl);
 
-    if (b.cyanTrim) col(0, 1, 1, 0.8f);
-    else col(1, 0, 1, 0.8f);
+    if (b.cyanTrim) col(0.35f, 0.85f, 0.95f, 0.75f);
+    else if (b.windowType == 3) col(0.90f, 0.45f, 0.80f, 0.75f);
+    else col(0.95f, 0.75f, 0.35f, 0.75f);
     glLineWidth(2.0f);
     glBegin(GL_LINE_LOOP);
         glVertex3f(fbl.x, fbl.y, fbl.z);
@@ -630,6 +910,146 @@ void drawBuilding(const Building& b) {
     glLineWidth(1.0f);
 
     drawBuildingWindows(b);
+
+    // Extended rooftop details: hvac boxes, solar panels, chimneys, water tank, railings, ladders, antenna.
+    float rInsetX = b.w * 0.16f;
+    float rInsetZ = b.d * 0.18f;
+    float roofY = b.y + b.h;
+
+    // HVAC Box 1 (main unit, south-west corner)
+    col(0.34f, 0.35f, 0.38f);
+    quad4(project(b.x + rInsetX, roofY + 1.0f, b.z + rInsetZ),
+          project(b.x + rInsetX + 26.0f, roofY + 1.0f, b.z + rInsetZ),
+          project(b.x + rInsetX + 26.0f, roofY + 16.0f, b.z + rInsetZ + 20.0f),
+          project(b.x + rInsetX, roofY + 16.0f, b.z + rInsetZ + 20.0f));
+    col(0.46f, 0.47f, 0.50f);
+    quad4(project(b.x + rInsetX, roofY + 16.0f, b.z + rInsetZ),
+          project(b.x + rInsetX + 26.0f, roofY + 16.0f, b.z + rInsetZ),
+          project(b.x + rInsetX + 26.0f, roofY + 16.0f, b.z + rInsetZ + 20.0f),
+          project(b.x + rInsetX, roofY + 16.0f, b.z + rInsetZ + 20.0f));
+
+    // HVAC Box 2 (smaller unit, north-east corner)
+    col(0.36f, 0.37f, 0.40f);
+    quad4(project(b.x + b.w - rInsetX - 20.0f, roofY + 2.0f, b.z + b.d - rInsetZ - 24.0f),
+          project(b.x + b.w - rInsetX, roofY + 2.0f, b.z + b.d - rInsetZ - 24.0f),
+          project(b.x + b.w - rInsetX, roofY + 14.0f, b.z + b.d - rInsetZ),
+          project(b.x + b.w - rInsetX - 20.0f, roofY + 14.0f, b.z + b.d - rInsetZ));
+
+    // Chimney Stack (metal pipe, center-back)
+    col(0.42f, 0.43f, 0.46f);
+    float chimneyH = 28.0f;
+    float chimneyX = b.x + b.w * 0.5f;
+    float chimneyZ = b.z + b.d - rInsetZ - 6.0f;
+    quad4(project(chimneyX - 5.0f, roofY + 1.0f, chimneyZ),
+          project(chimneyX + 5.0f, roofY + 1.0f, chimneyZ),
+          project(chimneyX + 5.0f, roofY + chimneyH, chimneyZ + 4.0f),
+          project(chimneyX - 5.0f, roofY + chimneyH, chimneyZ + 4.0f));
+    col(0.35f, 0.36f, 0.39f);
+    quad4(project(chimneyX - 5.0f, roofY + 1.0f, chimneyZ),
+          project(chimneyX - 5.0f, roofY + chimneyH, chimneyZ + 4.0f),
+          project(chimneyX + 5.0f, roofY + chimneyH, chimneyZ + 4.0f),
+          project(chimneyX + 5.0f, roofY + 1.0f, chimneyZ));
+
+    // Water Tank (tall cylindrical look, north corner)
+    col(0.40f, 0.41f, 0.44f);
+    float tankX = b.x + rInsetX + 10.0f;
+    float tankZ = b.z + b.d - rInsetZ - 12.0f;
+    float tankH = 35.0f;
+    float tankR = 8.0f;
+    quad4(project(tankX - tankR, roofY + 2.0f, tankZ),
+          project(tankX + tankR, roofY + 2.0f, tankZ),
+          project(tankX + tankR, roofY + tankH, tankZ + tankR),
+          project(tankX - tankR, roofY + tankH, tankZ + tankR));
+    col(0.48f, 0.49f, 0.52f);
+    quad4(project(tankX - tankR, roofY + 2.0f, tankZ),
+          project(tankX - tankR, roofY + tankH, tankZ + tankR),
+          project(tankX + tankR, roofY + tankH, tankZ + tankR),
+          project(tankX + tankR, roofY + 2.0f, tankZ));
+
+    // Solar Panels (grid on roof surface, upper area)
+    col(0.18f, 0.24f, 0.32f, 0.65f);
+    glLineWidth(1.0f);
+    float solarStartX = b.x + b.w * 0.15f;
+    float solarEndX = b.x + b.w * 0.85f;
+    float solarStartZ = b.z + rInsetZ + 8.0f;
+    float solarEndZ = b.z + b.d * 0.5f;
+    float panelW = (solarEndX - solarStartX) / 3.0f;
+    float panelD = (solarEndZ - solarStartZ) / 2.0f;
+    
+    for (int px = 0; px < 3; ++px) {
+        for (int pz = 0; pz < 2; ++pz) {
+            float pX0 = solarStartX + px * panelW;
+            float pX1 = pX0 + panelW - 2.0f;
+            float pZ0 = solarStartZ + pz * panelD;
+            float pZ1 = pZ0 + panelD - 2.0f;
+            col(0.20f, 0.28f, 0.38f, 0.70f);
+            quad4(project(pX0, roofY + 0.5f, pZ0),
+                  project(pX1, roofY + 0.5f, pZ0),
+                  project(pX1, roofY + 0.5f, pZ1),
+                  project(pX0, roofY + 0.5f, pZ1));
+            col(0.35f, 0.45f, 0.60f, 0.50f);
+            glBegin(GL_LINE_LOOP);
+                glVertex3f(project(pX0, roofY + 0.5f, pZ0).x, project(pX0, roofY + 0.5f, pZ0).y, project(pX0, roofY + 0.5f, pZ0).z);
+                glVertex3f(project(pX1, roofY + 0.5f, pZ0).x, project(pX1, roofY + 0.5f, pZ0).y, project(pX1, roofY + 0.5f, pZ0).z);
+                glVertex3f(project(pX1, roofY + 0.5f, pZ1).x, project(pX1, roofY + 0.5f, pZ1).y, project(pX1, roofY + 0.5f, pZ1).z);
+                glVertex3f(project(pX0, roofY + 0.5f, pZ1).x, project(pX0, roofY + 0.5f, pZ1).y, project(pX0, roofY + 0.5f, pZ1).z);
+            glEnd();
+        }
+    }
+    glLineWidth(1.0f);
+
+    // Perimeter Railings (safety edge around roof)
+    col(0.52f, 0.54f, 0.58f, 0.80f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+        glVertex3f(project(b.x + rInsetX, roofY + 3.0f, b.z + rInsetZ).x, project(b.x + rInsetX, roofY + 3.0f, b.z + rInsetZ).y, project(b.x + rInsetX, roofY + 3.0f, b.z + rInsetZ).z);
+        glVertex3f(project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + rInsetZ).x, project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + rInsetZ).y, project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + rInsetZ).z);
+        glVertex3f(project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).x, project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).y, project(b.x + b.w - rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).z);
+        glVertex3f(project(b.x + rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).x, project(b.x + rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).y, project(b.x + rInsetX, roofY + 3.0f, b.z + b.d - rInsetZ).z);
+    glEnd();
+    glLineWidth(1.0f);
+
+    // Ladder (west side, vertical rungs)
+    col(0.54f, 0.56f, 0.60f);
+    glLineWidth(2.2f);
+    float ladderX = b.x + rInsetX + 3.0f;
+    float ladderZ = b.z + rInsetZ + 2.0f;
+    float ladderH = 24.0f;
+    glBegin(GL_LINES);
+        // Left rail
+        glVertex3f(project(ladderX, roofY, ladderZ).x, project(ladderX, roofY, ladderZ).y, project(ladderX, roofY, ladderZ).z);
+        glVertex3f(project(ladderX, roofY + ladderH, ladderZ + 4.0f).x, project(ladderX, roofY + ladderH, ladderZ + 4.0f).y, project(ladderX, roofY + ladderH, ladderZ + 4.0f).z);
+        // Right rail
+        glVertex3f(project(ladderX + 6.0f, roofY, ladderZ).x, project(ladderX + 6.0f, roofY, ladderZ).y, project(ladderX + 6.0f, roofY, ladderZ).z);
+        glVertex3f(project(ladderX + 6.0f, roofY + ladderH, ladderZ + 4.0f).x, project(ladderX + 6.0f, roofY + ladderH, ladderZ + 4.0f).y, project(ladderX + 6.0f, roofY + ladderH, ladderZ + 4.0f).z);
+        // Rungs
+        for (int rung = 0; rung < 8; ++rung) {
+            float rungY = roofY + (rung + 1) * (ladderH / 8.0f);
+            float rungZ = ladderZ + (rung + 1) * (4.0f / 8.0f);
+            glVertex3f(project(ladderX, rungY, rungZ).x, project(ladderX, rungY, rungZ).y, project(ladderX, rungY, rungZ).z);
+            glVertex3f(project(ladderX + 6.0f, rungY, rungZ).x, project(ladderX + 6.0f, rungY, rungZ).y, project(ladderX + 6.0f, rungY, rungZ).z);
+        }
+    glEnd();
+    glLineWidth(1.0f);
+
+    // Antenna Mast (tall center-back)
+    col(0.62f, 0.64f, 0.67f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINES);
+        V3 a0 = project(b.x + b.w - rInsetX - 8.0f, roofY, b.z + b.d - rInsetZ - 8.0f);
+        V3 a1 = project(b.x + b.w - rInsetX - 8.0f, roofY + 40.0f, b.z + b.d - rInsetZ - 8.0f);
+        glVertex3f(a0.x, a0.y, a0.z);
+        glVertex3f(a1.x, a1.y, a1.z);
+    glEnd();
+    glLineWidth(1.0f);
+
+    // Redlight Beacon (antenna tip)
+    col(0.90f, 0.35f, 0.35f, 0.85f);
+    glPointSize(3.2f);
+    glBegin(GL_POINTS);
+        V3 beacon = project(b.x + b.w - rInsetX - 8.0f, roofY + 42.0f, b.z + b.d - rInsetZ - 8.0f);
+        glVertex3f(beacon.x, beacon.y, beacon.z);
+    glEnd();
 }
 
 void drawCar(const Car& c) {
@@ -720,21 +1140,95 @@ void display() {
         col(0.05f, 0.02f, 0.1f); glVertex3f(0, 0, -99);
     glEnd();
 
-    col(0.01f, 0.01f, 0.02f);
+    col(0.06f, 0.06f, 0.07f);
     V3 g1 = project(-2000, 0, -2000);
     V3 g2 = project(2000, 0, -2000);
     V3 g3 = project(2000, 0, 2000);
     V3 g4 = project(-2000, 0, 2000);
     quad4(g1, g2, g3, g4);
 
+    // Extensive ground detailing: patches, grids, grates, curbs, and markers.
+    
+    // Subtle worn texture patches (irregular placement for variety)
+    col(0.09f, 0.09f, 0.10f, 0.32f);
+    quad4(project(260, 0.8f, -1220), project(1080, 0.8f, -1220), project(1130, 0.8f, -890), project(300, 0.8f, -890));
+    quad4(project(860, 0.8f, -220), project(1760, 0.8f, -220), project(1820, 0.8f, 200), project(900, 0.8f, 200));
+    quad4(project(350, 0.8f, 380), project(1260, 0.8f, 380), project(1320, 0.8f, 740), project(390, 0.8f, 740));
+
+    // Additional darker patches for texture variation
+    col(0.07f, 0.07f, 0.08f, 0.25f);
+    quad4(project(480, 0.8f, -550), project(720, 0.8f, -550), project(750, 0.8f, -280), project(500, 0.8f, -280));
+    quad4(project(1100, 0.8f, 50), project(1380, 0.8f, 50), project(1420, 0.8f, 340), project(1140, 0.8f, 340));
+    quad4(project(600, 0.8f, 520), project(880, 0.8f, 520), project(910, 0.8f, 820), project(630, 0.8f, 820));
+
+    // Lighter weathered spots (reflective areas)
+    col(0.12f, 0.12f, 0.13f, 0.18f);
+    quad4(project(340, 0.8f, -950), project(520, 0.8f, -950), project(540, 0.8f, -750), project(360, 0.8f, -750));
+    quad4(project(1200, 0.8f, -100), project(1360, 0.8f, -100), project(1380, 0.8f, 120), project(1220, 0.8f, 120));
+    quad4(project(700, 0.8f, 650), project(920, 0.8f, 650), project(940, 0.8f, 900), project(720, 0.8f, 900));
+
+    // Vertical grid lines (major lanes)
+    col(0.16f, 0.16f, 0.17f, 0.18f);
+    for (float x = 220.0f; x <= 1820.0f; x += 180.0f) {
+        drawPathway(x, -1320.0f, x + 30.0f, 980.0f, 0.75f, 2.4f, 0.16f, 0.16f, 0.17f, 0.18f);
+    }
+
+    // Horizontal grid lines (cross-streets)
+    col(0.13f, 0.13f, 0.14f, 0.22f);
+    for (float z = -1240.0f; z <= 900.0f; z += 210.0f) {
+        drawPathway(240.0f, z, 1840.0f, z + 35.0f, 0.75f, 2.0f, 0.13f, 0.13f, 0.14f, 0.22f);
+    }
+
+    // Additional finer grid for micro-detail (denser grid at lower opacity)
+    col(0.11f, 0.11f, 0.12f, 0.10f);
+    for (float x = 300.0f; x <= 1760.0f; x += 90.0f) {
+        drawPathway(x, -1300.0f, x + 12.0f, 950.0f, 0.3f, 0.8f, 0.11f, 0.11f, 0.12f, 0.10f);
+    }
+    for (float z = -1180.0f; z <= 850.0f; z += 105.0f) {
+        drawPathway(250.0f, z, 1850.0f, z + 18.0f, 0.3f, 0.75f, 0.11f, 0.11f, 0.12f, 0.10f);
+    }
+
+    // Metal grate textures (scattered across ground)
+    col(0.14f, 0.15f, 0.17f, 0.28f);
+    float grateSize = 60.0f;
+    // Grate 1
+    quad4(project(520, 0.9f, -400), project(520 + grateSize, 0.9f, -400), project(520 + grateSize, 0.9f, -400 + grateSize), project(520, 0.9f, -400 + grateSize));
+    glLineWidth(1.2f);
+    glBegin(GL_LINES);
+    for (int i = 0; i <= 4; ++i) {
+        float offset = i * (grateSize / 4.0f);
+        glVertex3f(project(520 + offset, 0.95f, -400).x, project(520 + offset, 0.95f, -400).y, project(520 + offset, 0.95f, -400).z);
+        glVertex3f(project(520 + offset, 0.95f, -400 + grateSize).x, project(520 + offset, 0.95f, -400 + grateSize).y, project(520 + offset, 0.95f, -400 + grateSize).z);
+        glVertex3f(project(520, 0.95f, -400 + offset).x, project(520, 0.95f, -400 + offset).y, project(520, 0.95f, -400 + offset).z);
+        glVertex3f(project(520 + grateSize, 0.95f, -400 + offset).x, project(520 + grateSize, 0.95f, -400 + offset).y, project(520 + grateSize, 0.95f, -400 + offset).z);
+    }
+    glEnd();
+
+    // Grate 2
+    col(0.14f, 0.15f, 0.17f, 0.28f);
+    quad4(project(1300, 0.9f, 450), project(1300 + grateSize, 0.9f, 450), project(1300 + grateSize, 0.9f, 450 + grateSize), project(1300, 0.9f, 450 + grateSize));
+    glLineWidth(1.2f);
+    glBegin(GL_LINES);
+    for (int i = 0; i <= 4; ++i) {
+        float offset = i * (grateSize / 4.0f);
+        glVertex3f(project(1300 + offset, 0.95f, 450).x, project(1300 + offset, 0.95f, 450).y, project(1300 + offset, 0.95f, 450).z);
+        glVertex3f(project(1300 + offset, 0.95f, 450 + grateSize).x, project(1300 + offset, 0.95f, 450 + grateSize).y, project(1300 + offset, 0.95f, 450 + grateSize).z);
+        glVertex3f(project(1300, 0.95f, 450 + offset).x, project(1300, 0.95f, 450 + offset).y, project(1300, 0.95f, 450 + offset).z);
+        glVertex3f(project(1300 + grateSize, 0.95f, 450 + offset).x, project(1300 + grateSize, 0.95f, 450 + offset).y, project(1300 + grateSize, 0.95f, 450 + offset).z);
+    }
+    glEnd();
+    glLineWidth(1.0f);
+
     col(0.05f, 0.05f, 0.07f);
     quad4(project(-150, 1, -2000), project(150, 1, -2000), project(150, 1, 2000), project(-150, 1, 2000));
 
+    // Painted street markers (dashed center line)
     col(0.95f, 0.95f, 0.95f);
     for (float z = -1900; z < 1900; z += 170.0f) {
         quad4(project(-4, 1.3f, z), project(4, 1.3f, z), project(4, 1.3f, z + 80.0f), project(-4, 1.3f, z + 80.0f));
     }
 
+    // Road condition variations (asphalt wear patterns)
     col(0.06f, 0.06f, 0.08f);
     quad4(project(-620, 1.05f, 300), project(-150, 1.05f, 300), project(-150, 1.05f, 470), project(-700, 1.05f, 560));
 
@@ -777,6 +1271,7 @@ void display() {
 
     drawConvenienceStore();
     for (const auto& c : cars) drawCar(c);
+    for (const auto& p : pedestrians) drawPedestrian(p);
 
     glDisable(GL_DEPTH_TEST);
 
@@ -820,6 +1315,26 @@ void timer(int) {
         if (c.z > 1500) c.z = -1500;
         if (c.z < -1500) c.z = 1500;
     }
+    
+    // Update pedestrians
+    for (auto& p : pedestrians) {
+        updatePedestrian(p, 1.0f);
+    }
+    
+    // Remove pedestrians that went out of bounds (z-axis only, x is unlimited for road-walking)
+    pedestrians.erase(
+        std::remove_if(pedestrians.begin(), pedestrians.end(),
+            [](const Pedestrian& p) {
+                return p.z < -1350.0f || p.z > 1000.0f;
+            }),
+        pedestrians.end()
+    );
+    
+    // Spawn new pedestrians (won't exceed 100, higher spawn rate)
+    if (pedestrians.size() < 100 && rand() % 100 < 30) {  // ~30% chance per frame
+        spawnPedestrian();
+    }
+    
     glutPostRedisplay();
     glutTimerFunc(16, timer, 0);
 }
@@ -892,6 +1407,14 @@ int main(int argc, char** argv) {
     spawnBuildingAtScreen(305, 1015, 94, 275, 84, 1, false);
     spawnBuildingAtScreen(1345, 990, 98, 292, 88, 3, true);
     spawnBuildingAtScreen(1606, 795, 102, 300, 90, 2, false);
+
+    // Buildings at PIN screen=(1392.0, 704.0) world=(629.4, 130.6)
+    spawnBuildingAtScreen(1392.0f, 704.0f, 105, 310, 95, 1, true);
+    spawnBuildingAtScreen(1392.0f, 704.0f, 98, 290, 88, 3, false);
+
+    // Buildings at PIN screen=(1663.0, 623.0) world=(704.9, -106.9)
+    spawnBuildingAtScreen(1663.0f, 623.0f, 102, 305, 92, 2, true);
+    spawnBuildingAtScreen(1663.0f, 623.0f, 100, 295, 87, 1, false);
 
     for (int i = 0; i < 4; ++i) spawnCar(i);
 
